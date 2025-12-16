@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/url"
 	"strconv"
@@ -22,11 +23,13 @@ type Client struct {
 	cseq          int
 	mu            sync.Mutex
 	rtpChan       chan []byte
-	running       bool
-	readStarted   sync.Once
 	stopCh        chan struct{}
 	closed        bool
 	videoTrackURL string // Extracted from SDP
+
+	// Reconnection
+	reconnectMu sync.Mutex
+	connected   bool
 }
 
 // NewClient creates a new RTSP client
@@ -47,8 +50,22 @@ func NewClient(rtspURL string) (*Client, error) {
 	}, nil
 }
 
-// Connect establishes the RTSP connection
+// Connect establishes the RTSP connection and starts streaming
 func (c *Client) Connect() error {
+	if err := c.connect(); err != nil {
+		return err
+	}
+
+	// Start read loop
+	go c.readLoop()
+
+	// Start keepalive loop
+	go c.keepaliveLoop()
+
+	return nil
+}
+
+func (c *Client) connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -62,8 +79,9 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("failed to connect to RTSP server: %w", err)
 	}
 	c.conn = conn
-	// Use larger buffer to handle big RTP packets
 	c.reader = bufio.NewReaderSize(conn, 256*1024)
+	c.cseq = 0
+	c.session = ""
 
 	// OPTIONS
 	if err := c.options(); err != nil {
@@ -71,7 +89,7 @@ func (c *Client) Connect() error {
 		return err
 	}
 
-	// DESCRIBE - get SDP and parse track URLs
+	// DESCRIBE
 	if err := c.describe(); err != nil {
 		c.conn.Close()
 		return err
@@ -89,25 +107,73 @@ func (c *Client) Connect() error {
 		return err
 	}
 
-	c.running = true
+	c.reconnectMu.Lock()
+	c.connected = true
+	c.reconnectMu.Unlock()
 
-	// Start reading immediately after PLAY
-	c.readStarted.Do(func() {
-		go c.readLoop()
-	})
-
+	log.Printf("RTSP: Connected and playing")
 	return nil
+}
+
+func (c *Client) reconnect() {
+	c.reconnectMu.Lock()
+	if !c.connected {
+		c.reconnectMu.Unlock()
+		return
+	}
+	c.connected = false
+	c.reconnectMu.Unlock()
+
+	// Close old connection
+	c.mu.Lock()
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+	c.mu.Unlock()
+
+	log.Printf("RTSP: Connection lost, reconnecting...")
+
+	// Retry loop
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-c.stopCh:
+			return
+		default:
+		}
+
+		// Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+		delay := time.Duration(1<<uint(attempt-1)) * time.Second
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+
+		log.Printf("RTSP: Reconnect attempt %d in %v", attempt, delay)
+		time.Sleep(delay)
+
+		select {
+		case <-c.stopCh:
+			return
+		default:
+		}
+
+		if err := c.connect(); err != nil {
+			log.Printf("RTSP: Reconnect failed: %v", err)
+			continue
+		}
+
+		log.Printf("RTSP: Reconnected successfully")
+		return
+	}
 }
 
 func (c *Client) sendRequest(method, uri string, headers map[string]string) (int, map[string]string, string, error) {
 	c.cseq++
 
-	// Build request
 	req := fmt.Sprintf("%s %s RTSP/1.0\r\n", method, uri)
 	req += fmt.Sprintf("CSeq: %d\r\n", c.cseq)
 	req += "User-Agent: ptz-remote/1.0\r\n"
 
-	// Add auth if present
 	if c.url.User != nil {
 		password, _ := c.url.User.Password()
 		auth := base64.StdEncoding.EncodeToString(
@@ -130,10 +196,8 @@ func (c *Client) sendRequest(method, uri string, headers map[string]string) (int
 		return 0, nil, "", fmt.Errorf("failed to send %s: %w", method, err)
 	}
 
-	// Read response
 	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
-	// Status line
 	statusLine, err := c.reader.ReadString('\n')
 	if err != nil {
 		return 0, nil, "", fmt.Errorf("failed to read response: %w", err)
@@ -145,7 +209,6 @@ func (c *Client) sendRequest(method, uri string, headers map[string]string) (int
 	}
 	statusCode, _ := strconv.Atoi(parts[1])
 
-	// Headers
 	respHeaders := make(map[string]string)
 	for {
 		line, err := c.reader.ReadString('\n')
@@ -164,7 +227,6 @@ func (c *Client) sendRequest(method, uri string, headers map[string]string) (int
 		}
 	}
 
-	// Body (if Content-Length present)
 	body := ""
 	if cl, ok := respHeaders["Content-Length"]; ok {
 		length, _ := strconv.Atoi(cl)
@@ -206,17 +268,14 @@ func (c *Client) describe() error {
 		return fmt.Errorf("DESCRIBE failed with status %d", status)
 	}
 
-	// Parse SDP to find video track control URL
 	c.videoTrackURL = c.parseSDPForVideoTrack(body)
 	if c.videoTrackURL == "" {
-		// Fallback: use the base URL directly
 		c.videoTrackURL = uri
 	}
 
 	return nil
 }
 
-// parseSDPForVideoTrack extracts the video track control URL from SDP
 func (c *Client) parseSDPForVideoTrack(sdp string) string {
 	lines := strings.Split(sdp, "\n")
 	baseURL := c.url.String()
@@ -227,30 +286,24 @@ func (c *Client) parseSDPForVideoTrack(sdp string) string {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
-		// Look for media line (m=video)
 		if strings.HasPrefix(line, "m=video") {
 			inVideoSection = true
 			continue
 		}
-		// Another media section starts
 		if strings.HasPrefix(line, "m=") && !strings.HasPrefix(line, "m=video") {
 			inVideoSection = false
 			continue
 		}
 
-		// Look for control attribute in video section
 		if inVideoSection && strings.HasPrefix(line, "a=control:") {
 			control := strings.TrimPrefix(line, "a=control:")
 			control = strings.TrimSpace(control)
 
-			// Control can be absolute URL or relative
 			if strings.HasPrefix(control, "rtsp://") {
 				controlURL = control
 			} else if control == "*" {
-				// Use base URL
 				controlURL = baseURL
 			} else {
-				// Relative URL - append to base
 				if strings.HasSuffix(baseURL, "/") {
 					controlURL = baseURL + control
 				} else {
@@ -261,7 +314,6 @@ func (c *Client) parseSDPForVideoTrack(sdp string) string {
 		}
 	}
 
-	// If no video-specific control found, look for session-level control
 	if controlURL == "" {
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
@@ -286,7 +338,6 @@ func (c *Client) parseSDPForVideoTrack(sdp string) string {
 }
 
 func (c *Client) setup() error {
-	// Use the track URL from SDP, or fall back to base URL
 	uri := c.videoTrackURL
 	if uri == "" {
 		uri = c.url.String()
@@ -303,7 +354,6 @@ func (c *Client) setup() error {
 		return fmt.Errorf("SETUP failed with status %d", status)
 	}
 
-	// Extract session ID
 	if sess, ok := respHeaders["Session"]; ok {
 		parts := strings.Split(sess, ";")
 		c.session = strings.TrimSpace(parts[0])
@@ -327,13 +377,50 @@ func (c *Client) play() error {
 	return nil
 }
 
+// keepaliveLoop sends periodic keepalive requests to prevent session timeout
+func (c *Client) keepaliveLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.reconnectMu.Lock()
+			connected := c.connected
+			c.reconnectMu.Unlock()
+
+			if !connected {
+				continue
+			}
+
+			c.mu.Lock()
+			if c.conn == nil || c.session == "" {
+				c.mu.Unlock()
+				continue
+			}
+
+			// Send GET_PARAMETER as keepalive (more widely supported than OPTIONS with session)
+			uri := c.url.String()
+			_, _, _, err := c.sendRequest("GET_PARAMETER", uri, nil)
+			c.mu.Unlock()
+
+			if err != nil {
+				log.Printf("RTSP: Keepalive failed: %v", err)
+				go c.reconnect()
+			}
+		}
+	}
+}
+
 // RTPChannel returns the channel for receiving RTP packets
 func (c *Client) RTPChannel() <-chan []byte {
 	return c.rtpChan
 }
 
 func (c *Client) readLoop() {
-	buf := make([]byte, 128*1024) // Large buffer for video frames
+	buf := make([]byte, 128*1024)
 
 	for {
 		select {
@@ -342,28 +429,50 @@ func (c *Client) readLoop() {
 		default:
 		}
 
-		c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		c.reconnectMu.Lock()
+		connected := c.connected
+		c.reconnectMu.Unlock()
+
+		if !connected {
+			// Wait a bit before checking again
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		c.mu.Lock()
+		conn := c.conn
+		reader := c.reader
+		c.mu.Unlock()
+
+		if conn == nil || reader == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
 		// Read interleaved frame header: $ channel(1) length(2)
 		header := make([]byte, 4)
-		_, err := io.ReadFull(c.reader, header)
+		_, err := io.ReadFull(reader, header)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Timeout is OK, just no data
 				continue
 			}
-			// Check if we're shutting down
+
 			select {
 			case <-c.stopCh:
 				return
 			default:
 			}
-			// Connection error - exit loop
-			return
+
+			log.Printf("RTSP: Read error: %v", err)
+			go c.reconnect()
+			continue
 		}
 
 		if header[0] != '$' {
-			// Not an interleaved frame - might be RTSP response, skip
-			// Read until we find a $ or timeout
+			// Not an interleaved frame, skip
 			continue
 		}
 
@@ -374,14 +483,15 @@ func (c *Client) readLoop() {
 			continue
 		}
 
-		// Read RTP data
-		_, err = io.ReadFull(c.reader, buf[:length])
+		_, err = io.ReadFull(reader, buf[:length])
 		if err != nil {
 			select {
 			case <-c.stopCh:
 				return
 			default:
 			}
+			log.Printf("RTSP: Read payload error: %v", err)
+			go c.reconnect()
 			continue
 		}
 
@@ -409,14 +519,10 @@ func (c *Client) Close() error {
 		return nil
 	}
 	c.closed = true
-	c.running = false
 
-	// Signal stop to read loop
 	close(c.stopCh)
 
-	// Send TEARDOWN
 	if c.conn != nil {
-		// Best effort teardown
 		c.conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 		c.sendRequest("TEARDOWN", c.url.String(), nil)
 		return c.conn.Close()
