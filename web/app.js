@@ -320,8 +320,8 @@ class PTZClient {
 
     // Apply curve mapping for finer control at medium speeds
     // exponent > 1 gives more precision at lower speeds, still reaches 1.0 at max
-    // exponent of 2.0 is quadratic, 2.5 gives even more low-speed precision
-    applyCurve(value, exponent = 2.0) {
+    // 2.5 matches Apex Legends default response curve
+    applyCurve(value, exponent = 2.5) {
         const sign = value > 0 ? 1 : -1;
         return sign * Math.pow(Math.abs(value), exponent);
     }
