@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PTZ Remote Control</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        html, body { height: 100%; overflow: hidden; }
+        .joystick-visual {
+            position: relative;
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: #1f2937;
+            border: 2px solid #374151;
+        }
+        .joystick-dot {
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #3b82f6;
+            transform: translate(-50%, -50%);
+            transition: all 0.05s ease-out;
+        }
+        .zoom-bar {
+            width: 14px;
+            height: 48px;
+            background: #1f2937;
+            border: 2px solid #374151;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+        .zoom-fill {
+            position: absolute;
+            bottom: 50%;
+            left: 0;
+            right: 0;
+            background: #3b82f6;
+            transition: all 0.05s ease-out;
+        }
+        .zoom-fill.negative {
+            top: 50%;
+            bottom: auto;
+            background: #ef4444;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white h-screen flex flex-col">
+    <!-- Header Bar -->
+    <div class="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
+        <div class="flex items-center gap-4 text-xs">
+            <span class="font-semibold text-sm text-gray-100">PTZ Remote</span>
+            <div class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-500" id="ws-dot"></span>
+                <span id="ws-status" class="text-gray-400">Connecting...</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-500" id="camera-dot"></span>
+                <span class="text-gray-500">Cam:</span>
+                <span id="camera-status" class="text-gray-400">--</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+                <span class="text-gray-500">Ping:</span>
+                <span id="latency" class="text-gray-400 font-mono">--</span>
+            </div>
+        </div>
+        <div class="flex items-center gap-1.5 text-xs">
+            <span class="w-1.5 h-1.5 rounded-full bg-gray-500" id="gamepad-dot"></span>
+            <span id="gamepad-status" class="text-gray-400 max-w-[150px] truncate">No gamepad</span>
+        </div>
+    </div>
+
+    <!-- Error Banner -->
+    <div id="error-banner" class="hidden bg-red-900/80 border-b border-red-700 px-4 py-2">
+        <div class="flex items-center gap-2">
+            <svg class="w-4 h-4 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span id="error-message" class="text-red-200 text-xs"></span>
+            <button id="error-dismiss" class="ml-auto text-red-400 hover:text-red-200">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- Video Container (fills remaining space) -->
+    <div class="flex-1 bg-black relative overflow-hidden">
+        <video id="video" autoplay playsinline muted class="w-full h-full object-contain"></video>
+        <div id="video-overlay" class="absolute inset-0 flex items-center justify-center bg-gray-900/80">
+            <div class="text-center">
+                <svg class="w-12 h-12 mx-auto mb-2 text-gray-600 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                </svg>
+                <p id="video-status" class="text-gray-500 text-sm">Waiting for video stream...</p>
+            </div>
+        </div>
+
+        <!-- PTZ Overlay (bottom-right corner) -->
+        <div class="absolute bottom-3 right-3 bg-gray-900/70 backdrop-blur rounded-lg p-2 flex items-center gap-3">
+            <div class="flex items-center gap-2">
+                <div class="joystick-visual">
+                    <div id="joystick-dot" class="joystick-dot" style="left: 50%; top: 50%;"></div>
+                </div>
+                <div class="text-xs leading-tight">
+                    <div class="text-gray-500">P <span id="pan-value" class="text-gray-400 font-mono">0.00</span></div>
+                    <div class="text-gray-500">T <span id="tilt-value" class="text-gray-400 font-mono">0.00</span></div>
+                </div>
+            </div>
+            <div class="flex items-center gap-1.5">
+                <div class="zoom-bar">
+                    <div id="zoom-fill" class="zoom-fill" style="height: 0%;"></div>
+                    <div class="absolute left-0 right-0 top-1/2 h-px bg-gray-600"></div>
+                </div>
+                <div class="text-xs">
+                    <div class="text-gray-500">Z</div>
+                    <div id="zoom-value" class="text-gray-400 font-mono">0.00</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
