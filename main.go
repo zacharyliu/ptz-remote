@@ -2,8 +2,10 @@ package main
 
 import (
 	"embed"
+	"errors"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -46,7 +48,6 @@ func main() {
 		<-sigCh
 		log.Println("Shutting down...")
 		srv.Stop()
-		os.Exit(0)
 	}()
 
 	// Start server
@@ -62,7 +63,7 @@ func main() {
 		log.Printf("  WebRTC: ICE-lite mode enabled with IPs: %s", cfg.ICEIPs)
 	}
 
-	if err := srv.Start(); err != nil {
+	if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Server error: %v", err)
 	}
 }

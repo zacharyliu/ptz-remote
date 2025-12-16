@@ -230,6 +230,7 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 
 	close(c.stopCh)
+	close(c.rtpChan)
 
 	if client != nil {
 		client.Close()

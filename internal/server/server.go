@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -37,6 +39,8 @@ type Server struct {
 	viscaCtrl  *visca.Controller
 	upgrader   websocket.Upgrader
 	staticFS   fs.FS
+	httpServer *http.Server
+	shutdown   atomic.Bool
 }
 
 // Client represents a connected WebSocket client
@@ -113,8 +117,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.Handle("/", http.FileServer(http.FS(s.staticFS)))
 
+	s.httpServer = &http.Server{
+		Addr:    s.cfg.ListenAddr,
+		Handler: mux,
+	}
+
 	log.Printf("Server starting on %s", s.cfg.ListenAddr)
-	return http.ListenAndServe(s.cfg.ListenAddr, mux)
+	return s.httpServer.ListenAndServe()
 }
 
 // broadcastRTP reads from RTSP and sends to all connected clients
@@ -137,12 +146,24 @@ func (s *Server) broadcastRTP() {
 
 // Stop stops the server
 func (s *Server) Stop() {
+	// Mark as shutting down to reject new connections
+	s.shutdown.Store(true)
+
+	// Shutdown HTTP server first (stops accepting new connections)
+	if s.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		s.httpServer.Shutdown(ctx)
+	}
+
+	// Close all existing clients
 	s.clientsMu.Lock()
 	for client := range s.clients {
 		client.Close()
 	}
 	s.clientsMu.Unlock()
 
+	// Close RTSP (this also unblocks broadcastRTP)
 	if s.rtspClient != nil {
 		s.rtspClient.Close()
 	}
@@ -152,6 +173,12 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Reject new connections during shutdown
+	if s.shutdown.Load() {
+		http.Error(w, "Server shutting down", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade error: %v", err)
