@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/pion/webrtc/v3"
@@ -14,11 +15,13 @@ type Session struct {
 	onICE       func(candidate *webrtc.ICECandidate)
 	mu          sync.Mutex
 	closed      bool
+	iceLite     bool // Whether ICE-lite mode is enabled
 }
 
 // Config for WebRTC session
 type Config struct {
 	ICEServers []string // STUN/TURN server URLs
+	StaticIPs  string   // Comma-separated list of static server IPs (enables ICE-lite mode)
 }
 
 // DefaultConfig returns a default WebRTC configuration
@@ -36,10 +39,25 @@ func NewSession(cfg Config, onICE func(*webrtc.ICECandidate)) (*Session, error) 
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{},
 	}
-	for _, url := range cfg.ICEServers {
-		config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
-			URLs: []string{url},
-		})
+
+	iceLite := false
+	var staticIPs []string
+
+	// Handle ICE-lite mode with static IPs
+	if cfg.StaticIPs != "" {
+		iceLite = true
+		staticIPs = strings.Split(cfg.StaticIPs, ",")
+		for i := range staticIPs {
+			staticIPs[i] = strings.TrimSpace(staticIPs[i])
+		}
+		// In ICE-lite mode, we don't use STUN/TURN servers
+	} else {
+		// Normal mode: use STUN/TURN servers
+		for _, url := range cfg.ICEServers {
+			config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
+				URLs: []string{url},
+			})
+		}
 	}
 
 	// Create peer connection
@@ -49,8 +67,9 @@ func NewSession(cfg Config, onICE func(*webrtc.ICECandidate)) (*Session, error) 
 	}
 
 	session := &Session{
-		pc:    pc,
-		onICE: onICE,
+		pc:      pc,
+		onICE:   onICE,
+		iceLite: iceLite,
 	}
 
 	// Handle ICE candidates
@@ -109,7 +128,12 @@ func (s *Session) CreateOffer() (string, error) {
 		return "", fmt.Errorf("failed to set local description: %w", err)
 	}
 
-	// Wait for ICE gathering to complete
+	// In ICE-lite mode, return immediately without waiting for ICE gathering
+	if s.iceLite {
+		return s.pc.LocalDescription().SDP, nil
+	}
+
+	// In normal mode, wait for ICE gathering to complete
 	gatherComplete := webrtc.GatheringCompletePromise(s.pc)
 	<-gatherComplete
 

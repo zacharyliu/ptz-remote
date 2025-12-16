@@ -20,6 +20,7 @@ func main() {
 	rtspURL := flag.String("rtsp", "", "RTSP URL for camera stream")
 	viscaAddr := flag.String("visca", "", "VISCA address (TCP: host:port)")
 	viscaProto := flag.String("visca-proto", "udp", "VISCA protocol (udp or tcp)")
+	iceIPs := flag.String("ice-ips", "", "Comma-separated list of static server IPs (enables ICE-lite mode)")
 	flag.Parse()
 
 	// Create server config
@@ -28,6 +29,7 @@ func main() {
 		RTSPURL:       *rtspURL,
 		VISCAAddress:  *viscaAddr,
 		VISCAProtocol: *viscaProto,
+		ICEIPs:        *iceIPs,
 	}
 
 	// Create server
@@ -55,6 +57,9 @@ func main() {
 	}
 	if cfg.VISCAAddress != "" {
 		log.Printf("  VISCA: %s (%s)", cfg.VISCAAddress, cfg.VISCAProtocol)
+	}
+	if cfg.ICEIPs != "" {
+		log.Printf("  WebRTC: ICE-lite mode enabled with IPs: %s", cfg.ICEIPs)
 	}
 
 	if err := srv.Start(); err != nil {

@@ -25,6 +25,7 @@ type Config struct {
 	RTSPURL       string
 	VISCAAddress  string
 	VISCAProtocol string // "udp" or "tcp"
+	ICEIPs        string // Comma-separated list of static server IPs
 }
 
 // Server is the main PTZ remote server
@@ -184,7 +185,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (c *Client) initWebRTC() error {
 	// Create WebRTC session
-	session, err := webrtc.NewSession(webrtc.DefaultConfig(), func(candidate *pwebrtc.ICECandidate) {
+	wcfg := webrtc.DefaultConfig()
+	if c.server.cfg.ICEIPs != "" {
+		wcfg.StaticIPs = c.server.cfg.ICEIPs
+	}
+
+	session, err := webrtc.NewSession(wcfg, func(candidate *pwebrtc.ICECandidate) {
 		// Send ICE candidate to client
 		payload := protocol.ICECandidatePayload{
 			Candidate:     candidate.ToJSON().Candidate,

@@ -208,27 +208,16 @@ class PTZClient {
     // --- WebRTC ---
 
     async handleOffer(payload) {
-        this.elements.videoStatus.textContent = 'Connecting...';
+        this.elements.videoStatus.textContent = 'Establishing connection...';
 
         // Close existing peer connection if any
         if (this.pc) {
             this.pc.close();
         }
 
-        // Detect if we're on a local network (same host or private IP)
-        const isLocal = window.location.hostname === 'localhost' ||
-            window.location.hostname === '127.0.0.1' ||
-            window.location.hostname.startsWith('192.168.') ||
-            window.location.hostname.startsWith('10.') ||
-            window.location.hostname.startsWith('172.');
-
-        // For local network, skip STUN server to avoid external lookup delay
-        // For remote connections, use STUN for NAT traversal
-        const config = isLocal ? {} : {
+        this.pc = new RTCPeerConnection({
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        };
-
-        this.pc = new RTCPeerConnection(config);
+        });
 
         this.pc.onicecandidate = (event) => {
             if (event.candidate) {
@@ -241,18 +230,17 @@ class PTZClient {
         };
 
         this.pc.oniceconnectionstatechange = () => {
-            const state = this.pc.iceConnectionState;
-            console.log('ICE state:', state);
-            if (state === 'connected' || state === 'completed') {
-                this.elements.videoOverlay.classList.add('hidden');
-            } else if (state === 'failed') {
-                this.elements.videoStatus.textContent = 'Connection failed';
+            console.log('ICE connection state:', this.pc.iceConnectionState);
+            if (this.pc.iceConnectionState === 'failed') {
+                this.elements.videoStatus.textContent = 'Connection failed. Retrying...';
             }
         };
 
         this.pc.ontrack = (event) => {
+            console.log('Received track:', event.track.kind);
             if (event.streams && event.streams[0]) {
                 this.elements.video.srcObject = event.streams[0];
+                this.elements.videoOverlay.classList.add('hidden');
             }
         };
 
