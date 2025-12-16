@@ -297,9 +297,10 @@ class PTZClient {
                 const gamepad = navigator.getGamepads()[this.gamepadIndex];
                 if (gamepad) {
                     // Left stick for pan/tilt, right stick Y for zoom
-                    const pan = this.applyDeadzone(gamepad.axes[0]);
-                    const tilt = this.applyDeadzone(-gamepad.axes[1]); // Invert Y
-                    const zoom = this.applyDeadzone(-gamepad.axes[3]); // Right stick Y, inverted
+                    // Apply deadzone then curve for finer control at medium speeds
+                    const pan = this.applyCurve(this.applyDeadzone(gamepad.axes[0]));
+                    const tilt = this.applyCurve(this.applyDeadzone(-gamepad.axes[1])); // Invert Y
+                    const zoom = this.applyCurve(this.applyDeadzone(-gamepad.axes[3])); // Right stick Y, inverted
 
                     this.currentPTZ = { pan, tilt, zoom };
                     this.updatePTZDisplay(pan, tilt, zoom);
@@ -315,6 +316,14 @@ class PTZClient {
         // Scale the value to start from 0 after deadzone
         const sign = value > 0 ? 1 : -1;
         return sign * ((Math.abs(value) - deadzone) / (1 - deadzone));
+    }
+
+    // Apply curve mapping for finer control at medium speeds
+    // exponent > 1 gives more precision at lower speeds, still reaches 1.0 at max
+    // exponent of 2.0 is quadratic, 2.5 gives even more low-speed precision
+    applyCurve(value, exponent = 2.0) {
+        const sign = value > 0 ? 1 : -1;
+        return sign * Math.pow(Math.abs(value), exponent);
     }
 
     // --- PTZ Commands ---
