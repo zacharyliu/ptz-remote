@@ -15,7 +15,9 @@ import (
 	"github.com/gorilla/websocket"
 	pwebrtc "github.com/pion/webrtc/v3"
 
+	"ptz-remote/internal/panasonic"
 	"ptz-remote/internal/protocol"
+	"ptz-remote/internal/ptz"
 	"ptz-remote/internal/rtsp"
 	"ptz-remote/internal/visca"
 	"ptz-remote/internal/webrtc"
@@ -23,11 +25,12 @@ import (
 
 // Config for the server
 type Config struct {
-	ListenAddr    string
-	RTSPURL       string
-	VISCAAddress  string
-	VISCAProtocol string // "udp" or "tcp"
-	ICEIPs        string // Comma-separated list of static server IPs
+	ListenAddr       string
+	RTSPURL          string
+	VISCAAddress     string
+	VISCAProtocol    string // "udp" or "tcp"
+	PanasonicAddress string // Panasonic camera IP address
+	ICEIPs           string // Comma-separated list of static server IPs
 }
 
 // Server is the main PTZ remote server
@@ -36,7 +39,7 @@ type Server struct {
 	clients    map[*Client]bool
 	clientsMu  sync.RWMutex
 	rtspClient *rtsp.Client
-	viscaCtrl  *visca.Controller
+	ptzCtrl    ptz.Controller
 	upgrader   websocket.Upgrader
 	staticFS   fs.FS
 	httpServer *http.Server
@@ -98,7 +101,7 @@ func (s *Server) Start() error {
 		}
 	}
 
-	// Connect to VISCA if configured
+	// Connect to PTZ controller if configured (VISCA or Panasonic)
 	if s.cfg.VISCAAddress != "" {
 		ctrl, err := visca.NewController(visca.Config{
 			Address:  s.cfg.VISCAAddress,
@@ -107,8 +110,18 @@ func (s *Server) Start() error {
 		if err != nil {
 			log.Printf("Warning: Failed to create VISCA controller: %v", err)
 		} else {
-			s.viscaCtrl = ctrl
+			s.ptzCtrl = ctrl
 			log.Printf("Connected to VISCA: %s", s.cfg.VISCAAddress)
+		}
+	} else if s.cfg.PanasonicAddress != "" {
+		ctrl, err := panasonic.NewController(panasonic.Config{
+			Address: s.cfg.PanasonicAddress,
+		})
+		if err != nil {
+			log.Printf("Warning: Failed to create Panasonic controller: %v", err)
+		} else {
+			s.ptzCtrl = ctrl
+			log.Printf("Connected to Panasonic: %s", s.cfg.PanasonicAddress)
 		}
 	}
 
@@ -167,8 +180,8 @@ func (s *Server) Stop() {
 	if s.rtspClient != nil {
 		s.rtspClient.Close()
 	}
-	if s.viscaCtrl != nil {
-		s.viscaCtrl.Close()
+	if s.ptzCtrl != nil {
+		s.ptzCtrl.Close()
 	}
 }
 
@@ -275,10 +288,16 @@ func (c *Client) forwardRTP() {
 }
 
 func (c *Client) sendStatus() {
+	controlProtocol := ""
+	if c.server.cfg.VISCAAddress != "" {
+		controlProtocol = "visca"
+	} else if c.server.cfg.PanasonicAddress != "" {
+		controlProtocol = "panasonic"
+	}
 	status := protocol.StatusPayload{
 		CameraConnected: c.server.rtspClient != nil,
 		RTSPURL:         c.server.cfg.RTSPURL,
-		ControlProtocol: "visca",
+		ControlProtocol: controlProtocol,
 		VideoProtocol:   "rtsp",
 	}
 	c.sendMessage(protocol.TypeStatus, status)
@@ -383,8 +402,8 @@ func (c *Client) handleMessage(data []byte) {
 		c.handlePTZCommand(payload)
 
 	case protocol.TypePTZStop:
-		if c.server.viscaCtrl != nil {
-			if err := c.server.viscaCtrl.Stop(); err != nil {
+		if c.server.ptzCtrl != nil {
+			if err := c.server.ptzCtrl.Stop(); err != nil {
 				log.Printf("Failed to stop PTZ: %v", err)
 			}
 		}
@@ -402,33 +421,33 @@ func (c *Client) handleMessage(data []byte) {
 }
 
 func (c *Client) handlePTZCommand(cmd protocol.PTZCommandPayload) {
-	if c.server.viscaCtrl == nil {
+	if c.server.ptzCtrl == nil {
 		return
 	}
 
 	// Send pan/tilt command
-	if err := c.server.viscaCtrl.PanTilt(cmd.Pan, cmd.Tilt); err != nil {
+	if err := c.server.ptzCtrl.PanTilt(cmd.Pan, cmd.Tilt); err != nil {
 		log.Printf("PTZ pan/tilt error: %v", err)
 	}
 
 	// Send zoom command
-	if err := c.server.viscaCtrl.Zoom(cmd.Zoom); err != nil {
+	if err := c.server.ptzCtrl.Zoom(cmd.Zoom); err != nil {
 		log.Printf("PTZ zoom error: %v", err)
 	}
 }
 
 func (c *Client) handlePTZPreset(preset protocol.PTZPresetPayload) {
-	if c.server.viscaCtrl == nil {
+	if c.server.ptzCtrl == nil {
 		return
 	}
 
 	switch preset.Action {
 	case "recall":
-		if err := c.server.viscaCtrl.RecallPreset(preset.PresetNumber); err != nil {
+		if err := c.server.ptzCtrl.RecallPreset(preset.PresetNumber); err != nil {
 			log.Printf("Failed to recall preset: %v", err)
 		}
 	case "save":
-		if err := c.server.viscaCtrl.SavePreset(preset.PresetNumber); err != nil {
+		if err := c.server.ptzCtrl.SavePreset(preset.PresetNumber); err != nil {
 			log.Printf("Failed to save preset: %v", err)
 		}
 	}
