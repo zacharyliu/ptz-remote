@@ -297,7 +297,7 @@ class PTZClient {
     setupMouseControl() {
         const videoContainer = this.elements.video.parentElement;
 
-        const getMousePTZ = (e) => {
+        const getPointerPTZ = (clientX, clientY) => {
             const rect = videoContainer.getBoundingClientRect();
             const centerX = rect.left + rect.width / 2;
             const centerY = rect.top + rect.height / 2;
@@ -305,8 +305,8 @@ class PTZClient {
             // Calculate offset from center, normalized to -1 to 1
             // Use the smaller dimension to ensure full range is reachable
             const maxRadius = Math.min(rect.width, rect.height) / 2;
-            const rawPan = (e.clientX - centerX) / maxRadius;
-            const rawTilt = -(e.clientY - centerY) / maxRadius; // Invert Y so up is positive
+            const rawPan = (clientX - centerX) / maxRadius;
+            const rawTilt = -(clientY - centerY) / maxRadius; // Invert Y so up is positive
 
             // Clamp to -1 to 1
             const clampedPan = Math.max(-1, Math.min(1, rawPan));
@@ -319,23 +319,22 @@ class PTZClient {
             };
         };
 
-        videoContainer.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return; // Only left click
+        const startControl = (clientX, clientY) => {
             this.mouseDown = true;
             this.mouseControlActive = true;
-            const { pan, tilt } = getMousePTZ(e);
+            const { pan, tilt } = getPointerPTZ(clientX, clientY);
             this.currentPTZ = { pan, tilt, zoom: this.currentPTZ.zoom };
             this.updatePTZDisplay(pan, tilt, this.currentPTZ.zoom);
-        });
+        };
 
-        videoContainer.addEventListener('mousemove', (e) => {
+        const moveControl = (clientX, clientY) => {
             if (!this.mouseDown) return;
-            const { pan, tilt } = getMousePTZ(e);
+            const { pan, tilt } = getPointerPTZ(clientX, clientY);
             this.currentPTZ = { pan, tilt, zoom: this.currentPTZ.zoom };
             this.updatePTZDisplay(pan, tilt, this.currentPTZ.zoom);
-        });
+        };
 
-        const stopMouseControl = () => {
+        const stopControl = () => {
             if (this.mouseDown) {
                 this.mouseDown = false;
                 this.mouseControlActive = false;
@@ -344,11 +343,25 @@ class PTZClient {
             }
         };
 
-        videoContainer.addEventListener('mouseup', stopMouseControl);
-        videoContainer.addEventListener('mouseleave', stopMouseControl);
+        // Use Pointer Events for unified mouse/touch/pen handling
+        videoContainer.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0 && e.pointerType === 'mouse') return; // Only left click for mouse
+            e.preventDefault();
+            videoContainer.setPointerCapture(e.pointerId);
+            startControl(e.clientX, e.clientY);
+        });
 
-        // Prevent context menu on right-click
+        videoContainer.addEventListener('pointermove', (e) => {
+            moveControl(e.clientX, e.clientY);
+        });
+
+        videoContainer.addEventListener('pointerup', stopControl);
+        videoContainer.addEventListener('pointercancel', stopControl);
+        videoContainer.addEventListener('pointerleave', stopControl);
+
+        // Prevent context menu and touch scrolling
         videoContainer.addEventListener('contextmenu', (e) => e.preventDefault());
+        videoContainer.style.touchAction = 'none';
     }
 
     startGamepadLoop() {
