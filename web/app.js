@@ -12,6 +12,8 @@ class PTZClient {
         this.ptzSendInterval = 100; // 10 commands per second max
         this.pendingPTZUpdate = false;
         this.isMoving = false;
+        this.mouseDown = false;
+        this.mouseControlActive = false;
 
         this.elements = {
             // Connection status
@@ -48,6 +50,7 @@ class PTZClient {
         this.setupErrorDismiss();
         this.connect();
         this.setupGamepad();
+        this.setupMouseControl();
         this.startPingLoop();
         this.startGamepadLoop();
         this.startPTZSendLoop();
@@ -291,9 +294,67 @@ class PTZClient {
         });
     }
 
+    setupMouseControl() {
+        const videoContainer = this.elements.video.parentElement;
+
+        const getMousePTZ = (e) => {
+            const rect = videoContainer.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+
+            // Calculate offset from center, normalized to -1 to 1
+            // Use the smaller dimension to ensure full range is reachable
+            const maxRadius = Math.min(rect.width, rect.height) / 2;
+            const rawPan = (e.clientX - centerX) / maxRadius;
+            const rawTilt = -(e.clientY - centerY) / maxRadius; // Invert Y so up is positive
+
+            // Clamp to -1 to 1
+            const clampedPan = Math.max(-1, Math.min(1, rawPan));
+            const clampedTilt = Math.max(-1, Math.min(1, rawTilt));
+
+            // Apply curve for finer control
+            return {
+                pan: this.applyCurve(clampedPan),
+                tilt: this.applyCurve(clampedTilt)
+            };
+        };
+
+        videoContainer.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return; // Only left click
+            this.mouseDown = true;
+            this.mouseControlActive = true;
+            const { pan, tilt } = getMousePTZ(e);
+            this.currentPTZ = { pan, tilt, zoom: this.currentPTZ.zoom };
+            this.updatePTZDisplay(pan, tilt, this.currentPTZ.zoom);
+        });
+
+        videoContainer.addEventListener('mousemove', (e) => {
+            if (!this.mouseDown) return;
+            const { pan, tilt } = getMousePTZ(e);
+            this.currentPTZ = { pan, tilt, zoom: this.currentPTZ.zoom };
+            this.updatePTZDisplay(pan, tilt, this.currentPTZ.zoom);
+        });
+
+        const stopMouseControl = () => {
+            if (this.mouseDown) {
+                this.mouseDown = false;
+                this.mouseControlActive = false;
+                this.currentPTZ = { pan: 0, tilt: 0, zoom: 0 };
+                this.updatePTZDisplay(0, 0, 0);
+            }
+        };
+
+        videoContainer.addEventListener('mouseup', stopMouseControl);
+        videoContainer.addEventListener('mouseleave', stopMouseControl);
+
+        // Prevent context menu on right-click
+        videoContainer.addEventListener('contextmenu', (e) => e.preventDefault());
+    }
+
     startGamepadLoop() {
         const pollGamepad = () => {
-            if (this.gamepadIndex !== null) {
+            // Don't override mouse control with gamepad input
+            if (this.gamepadIndex !== null && !this.mouseControlActive) {
                 const gamepad = navigator.getGamepads()[this.gamepadIndex];
                 if (gamepad) {
                     // Left stick for pan/tilt, right stick Y for zoom
