@@ -2,7 +2,6 @@ package webrtc
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/pion/webrtc/v3"
@@ -10,12 +9,13 @@ import (
 
 // Session represents a WebRTC session with a client
 type Session struct {
-	pc          *webrtc.PeerConnection
-	videoTrack  *webrtc.TrackLocalStaticRTP
-	onICE       func(candidate *webrtc.ICECandidate)
-	mu          sync.Mutex
-	closed      bool
-	iceLite     bool // Whether ICE-lite mode is enabled
+	pc                   *webrtc.PeerConnection
+	videoTrack           *webrtc.TrackLocalStaticRTP
+	onICE                func(candidate *webrtc.ICECandidate)
+	mu                   sync.Mutex
+	closed               bool
+	remoteDescriptionSet bool
+	pendingCandidates    []webrtc.ICECandidateInit
 }
 
 // Config for WebRTC session
@@ -40,16 +40,8 @@ func NewSession(cfg Config, onICE func(*webrtc.ICECandidate)) (*Session, error) 
 		ICEServers: []webrtc.ICEServer{},
 	}
 
-	iceLite := false
-	var staticIPs []string
-
-	// Handle ICE-lite mode with static IPs
+	// Handle ICE-lite mode with static IPs (no STUN/TURN needed)
 	if cfg.StaticIPs != "" {
-		iceLite = true
-		staticIPs = strings.Split(cfg.StaticIPs, ",")
-		for i := range staticIPs {
-			staticIPs[i] = strings.TrimSpace(staticIPs[i])
-		}
 		// In ICE-lite mode, we don't use STUN/TURN servers
 	} else {
 		// Normal mode: use STUN/TURN servers
@@ -67,9 +59,8 @@ func NewSession(cfg Config, onICE func(*webrtc.ICECandidate)) (*Session, error) 
 	}
 
 	session := &Session{
-		pc:      pc,
-		onICE:   onICE,
-		iceLite: iceLite,
+		pc:    pc,
+		onICE: onICE,
 	}
 
 	// Handle ICE candidates
@@ -128,16 +119,8 @@ func (s *Session) CreateOffer() (string, error) {
 		return "", fmt.Errorf("failed to set local description: %w", err)
 	}
 
-	// In ICE-lite mode, return immediately without waiting for ICE gathering
-	if s.iceLite {
-		return s.pc.LocalDescription().SDP, nil
-	}
-
-	// In normal mode, wait for ICE gathering to complete
-	gatherComplete := webrtc.GatheringCompletePromise(s.pc)
-	<-gatherComplete
-
-	return s.pc.LocalDescription().SDP, nil
+	// Return immediately - ICE candidates will trickle via OnICECandidate callback
+	return offer.SDP, nil
 }
 
 // SetAnswer sets the remote SDP answer
@@ -155,6 +138,16 @@ func (s *Session) SetAnswer(sdp string) error {
 		return fmt.Errorf("failed to set remote description: %w", err)
 	}
 
+	s.remoteDescriptionSet = true
+
+	// Process any ICE candidates that arrived before the answer was set
+	for _, candidate := range s.pendingCandidates {
+		if err := s.pc.AddICECandidate(candidate); err != nil {
+			fmt.Printf("Failed to add queued ICE candidate: %v\n", err)
+		}
+	}
+	s.pendingCandidates = nil
+
 	return nil
 }
 
@@ -167,6 +160,12 @@ func (s *Session) AddICECandidate(candidate string, sdpMid string, sdpMLineIndex
 		Candidate:     candidate,
 		SDPMid:        &sdpMid,
 		SDPMLineIndex: &sdpMLineIndex,
+	}
+
+	// Queue candidate if remote description not set yet
+	if !s.remoteDescriptionSet {
+		s.pendingCandidates = append(s.pendingCandidates, ice)
+		return nil
 	}
 
 	err := s.pc.AddICECandidate(ice)

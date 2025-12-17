@@ -4,6 +4,8 @@ class PTZClient {
     constructor() {
         this.ws = null;
         this.pc = null;
+        this.remoteDescriptionSet = false;
+        this.pendingICECandidates = [];
         this.latency = 0;
         this.lastPTZ = { pan: 0, tilt: 0, zoom: 0 };
         this.currentPTZ = { pan: 0, tilt: 0, zoom: 0 };
@@ -218,6 +220,10 @@ class PTZClient {
             this.pc.close();
         }
 
+        // Reset ICE candidate queue for new connection
+        this.remoteDescriptionSet = false;
+        this.pendingICECandidates = [];
+
         this.pc = new RTCPeerConnection({
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
@@ -249,6 +255,16 @@ class PTZClient {
 
         try {
             await this.pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
+            this.remoteDescriptionSet = true;
+
+            // Process any ICE candidates that arrived before remote description was set
+            for (const candidate of this.pendingICECandidates) {
+                await this.pc.addIceCandidate(candidate).catch(e =>
+                    console.error('Error adding queued ICE candidate:', e)
+                );
+            }
+            this.pendingICECandidates = [];
+
             const answer = await this.pc.createAnswer();
             await this.pc.setLocalDescription(answer);
             this.send('answer', { sdp: answer.sdp });
@@ -259,13 +275,25 @@ class PTZClient {
     }
 
     handleICECandidate(payload) {
-        if (this.pc && payload.candidate) {
-            this.pc.addIceCandidate({
-                candidate: payload.candidate,
-                sdpMid: payload.sdp_mid,
-                sdpMLineIndex: payload.sdp_mline_index
-            }).catch(e => console.error('Error adding ICE candidate:', e));
+        if (!this.pc || !payload.candidate) {
+            return;
         }
+
+        const candidate = {
+            candidate: payload.candidate,
+            sdpMid: payload.sdp_mid,
+            sdpMLineIndex: payload.sdp_mline_index
+        };
+
+        // Queue candidate if remote description not set yet
+        if (!this.remoteDescriptionSet) {
+            this.pendingICECandidates.push(candidate);
+            return;
+        }
+
+        this.pc.addIceCandidate(candidate).catch(e =>
+            console.error('Error adding ICE candidate:', e)
+        );
     }
 
     // --- Gamepad ---
