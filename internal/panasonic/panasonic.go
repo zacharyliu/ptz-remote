@@ -3,6 +3,7 @@ package panasonic
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -48,7 +49,6 @@ func (t *throttle) trigger() {
 type Controller struct {
 	baseURL string
 	client  *http.Client
-	mu      sync.Mutex
 	stopCh  chan struct{}
 
 	// Pan/tilt state
@@ -78,7 +78,12 @@ func NewController(cfg Config) (*Controller, error) {
 	c := &Controller{
 		baseURL: fmt.Sprintf("http://%s/cgi-bin/aw_ptz", cfg.Address),
 		client: &http.Client{
-			Timeout: 2 * time.Second,
+			Timeout: 500 * time.Millisecond,
+			Transport: &http.Transport{
+				MaxIdleConns:        4,
+				MaxIdleConnsPerHost: 4,
+				IdleConnTimeout:     30 * time.Second,
+			},
 		},
 		stopCh: make(chan struct{}),
 	}
@@ -193,19 +198,15 @@ func (c *Controller) sendZoomCmd(zoom float64) {
 	c.sendCommand(fmt.Sprintf("#Z%02d", zoomSpeed))
 }
 
-// sendCommand sends a command to the camera via HTTP CGI
+// sendCommand sends a command via HTTP (fire-and-forget, non-blocking)
 func (c *Controller) sendCommand(cmd string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	url := fmt.Sprintf("%s?cmd=%s&res=1", c.baseURL, cmd)
-
-	resp, err := c.client.Get(url)
-	if err != nil {
-		return fmt.Errorf("failed to send command: %w", err)
-	}
-	defer resp.Body.Close()
-
+	go func() {
+		reqURL := fmt.Sprintf("%s?cmd=%s&res=1", c.baseURL, url.QueryEscape(cmd))
+		resp, err := c.client.Get(reqURL)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
 	return nil
 }
 
